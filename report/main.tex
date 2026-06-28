@@ -1,0 +1,331 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{amsmath}
+
+\begin{document}
+
+\title{Explaining R-GCN Node Classification on the AIFB RDF Knowledge Graph}
+
+\author{Steevan Gonsalves (4089415) \and Ashton Prince Rodrigues (4107301) \and Aman Sami Ur Rahman Mohammed (4107422)}
+
+\institute{Paderborn University}
+
+\maketitle
+
+\begin{abstract}
+This mini-project studies explainable node classification on an RDF knowledge graph. We use the AIFB RDF dataset, convert RDF triples into a PyTorch Geometric graph, train a two-layer Relational Graph Convolutional Network (R-GCN) using \texttt{FastRGCNConv}, and explain one selected prediction with GNNExplainer. The task is to classify labeled person nodes into affiliation classes using graph structure, relation types, and degree-based node features. The final model achieves a test accuracy of 94.44\% on a deterministic 80/20 stratified train-test split. GNNExplainer identifies important RDF relationships involving research groups, projects, publications, research areas, and people. The explanation is converted back into human-readable RDF triples so that the model decision can be interpreted in the original knowledge graph domain.
+\keywords{Explainable AI \and RDF \and Knowledge Graphs \and R-GCN \and GNNExplainer \and PyTorch Geometric}
+\end{abstract}
+
+\section{Introduction}
+
+Graph neural networks are commonly used for learning on structured data such as social networks, citation networks, molecular graphs, and knowledge graphs \cite{pyg,lecture-neural}. RDF knowledge graphs are especially interesting because their edges have semantic relation types, for example \emph{person member project} or \emph{research group publishes publication}. This makes RDF data suitable for relational graph neural networks, but it also creates a need for explanation methods that can show which graph relationships influenced a prediction.
+
+The goal of this project is to explain the predictions of a machine learning model on an RDF dataset, following the course motivation that XAI should make model behavior more understandable to users \cite{lecture-intro}. We use the AIFB RDF Knowledge Graph as the dataset and formulate the problem as node classification. The model predicts the affiliation class of person entities. The project follows the complete workflow required for the mini-project: selecting an RDF dataset, analyzing the data, training a model, evaluating predictive performance, generating explanations, and interpreting the explanations \cite{lecture-miniproject,lecture-org}.
+
+For the predictive model, we use a two-layer R-GCN implemented with PyTorch Geometric's \texttt{FastRGCNConv} \cite{rgcn,pyg,pygdocs}. R-GCNs are appropriate for RDF graphs because they can use different relation types during message passing. For explanation, we use GNNExplainer, which learns an edge importance mask for a selected prediction \cite{gnnexplainer,pygexplainerdocs}. The explanation is then converted back from numerical edge indices into RDF triples, making the result understandable in terms of entities and relations from the original dataset.
+
+The project does not aim to introduce a new graph learning algorithm. Instead, it applies existing graph neural network and explanation methods to an RDF dataset and focuses on making the full pipeline reproducible and interpretable.
+
+\section{Data Analysis}
+
+\subsection{Dataset}
+
+The selected dataset is the AIFB RDF Knowledge Graph \cite{aifb}. It describes academic entities such as people, research groups, publications, projects, and research areas. The RDF graph is stored in the file \texttt{aifbfixed\_complete.n3}. Classification labels are loaded from \texttt{completeDataset.tsv}.
+
+Each RDF triple has the form:
+
+\begin{center}
+\texttt{Subject -> Predicate -> Object}
+\end{center}
+
+In the graph conversion, subjects and objects become graph nodes, while predicates become relation types. A directed edge is created for every RDF triple.
+
+\subsection{Dataset Statistics}
+
+The RDF graph contains 29,226 triples. After converting the RDF graph into a PyTorch Geometric graph, the graph contains 8,285 nodes and 47 relation types. The classification file contains 176 labeled person nodes and 4 affiliation classes. All other graph nodes are unlabeled and are assigned the label value \texttt{-1}.
+
+\begin{table}
+\centering
+\caption{AIFB dataset statistics used in this project.}
+\begin{tabular}{|l|r|}
+\hline
+Statistic & Value \\
+\hline
+RDF triples & 29,226 \\
+\hline
+Graph nodes & 8,285 \\
+\hline
+Relation types & 47 \\
+\hline
+Labeled nodes & 176 \\
+\hline
+Unlabeled nodes & 8,109 \\
+\hline
+Target classes & 4 \\
+\hline
+Node features after preprocessing & 72 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Graph Conversion}
+
+The RDF graph is loaded with RDFLib \cite{rdflib}. Unique subjects and objects are collected to form the set of graph nodes. Predicates are collected as relation types. For reproducibility, nodes, relations, and RDF triples are sorted before assigning numerical IDs. This is important because unordered Python sets may assign different node indices after a kernel restart.
+
+The final PyTorch Geometric data object contains:
+
+\begin{itemize}
+    \item \texttt{x}: node feature matrix,
+    \item \texttt{edge\_index}: directed graph edges,
+    \item \texttt{edge\_type}: relation type of each edge,
+    \item \texttt{y}: node labels,
+    \item \texttt{train\_mask}: training nodes,
+    \item \texttt{test\_mask}: test nodes.
+\end{itemize}
+
+\subsection{Node Features and Labels}
+
+Node features are created using PyTorch Geometric's \texttt{OneHotDegree} transform \cite{pygdocs}. This produces degree-based structural features. Empty feature columns are removed, resulting in a final feature matrix of shape:
+
+\begin{center}
+\texttt{8285 x 72}
+\end{center}
+
+Labels are available only for 176 person nodes. Unlabeled nodes remain in the graph because they provide useful graph structure for message passing, but they are never used in the supervised training loss. This is verified in the notebook using assertions that ensure the training and test masks contain only labeled nodes.
+
+\section{Model Training and Evaluation}
+
+\subsection{Train-Test Split}
+
+The 176 labeled nodes are split into training and test sets using an 80/20 split. Stratified sampling is used to preserve the class distribution. The split is deterministic because a fixed random seed is used. The implementation uses scikit-learn's \texttt{train\_test\_split} utility \cite{sklearn}.
+
+\begin{itemize}
+    \item Training nodes: 140
+    \item Test nodes: 36
+\end{itemize}
+
+Only labeled nodes are included in the split. The notebook verifies that \texttt{train\_mask} and \texttt{test\_mask} do not include unlabeled nodes and do not overlap.
+
+\subsection{Model Architecture}
+
+The model is a two-layer Relational Graph Convolutional Network. The implementation uses \texttt{FastRGCNConv} from PyTorch Geometric \cite{rgcn,pygdocs}. The architecture is:
+
+\begin{center}
+\texttt{FastRGCNConv(72 -> 16) -> ReLU -> FastRGCNConv(16 -> 4)}
+\end{center}
+
+The input dimension is 72 because of the generated degree-based node features. The hidden layer has 16 units, and the output layer has 4 units corresponding to the four affiliation classes.
+
+\subsection{Training Setup}
+
+The model is trained for 100 epochs with the Adam optimizer and a learning rate of 0.01, implemented with PyTorch \cite{pytorch}. Cross-entropy loss is computed only on training nodes:
+
+\begin{center}
+\texttt{F.cross\_entropy(out[data.train\_mask], data.y[data.train\_mask])}
+\end{center}
+
+This ensures that unlabeled nodes are not included in the supervised loss. They only contribute indirectly through the graph structure during message passing.
+
+\subsection{Evaluation Results}
+
+The final model achieves a training accuracy of 97.86\% and a test accuracy of 94.44\%. Out of 36 test nodes, 34 are classified correctly.
+
+\begin{table}
+\centering
+\caption{Final model performance.}
+\begin{tabular}{|l|r|}
+\hline
+Metric & Value \\
+\hline
+Training accuracy & 97.86\% \\
+\hline
+Test accuracy & 94.44\% \\
+\hline
+Correct test nodes & 34 / 36 \\
+\hline
+\end{tabular}
+\end{table}
+
+The test accuracy briefly reaches 97.22\% during training and later stabilizes at 94.44\%. This kind of fluctuation is expected because the test set contains only 36 nodes. A single changed prediction changes the test accuracy by approximately 2.78 percentage points.
+
+\subsection{Reproducibility}
+
+The notebook was updated to make the experiment as reproducible as possible. A single seed is used for Python, NumPy, PyTorch, model initialization, train-test splitting, and GNNExplainer initialization. In addition, RDF nodes, relations, and triples are sorted before numerical IDs are assigned.
+
+After these changes, restarting the kernel and running all cells produces the same final accuracy and selected explanation node in the tested environment. Small differences may still occur across different hardware, PyTorch versions, PyTorch Geometric versions, or CUDA backends because some low-level operations may be nondeterministic.
+
+\section{Model Explanation}
+
+\subsection{Explanation Method}
+
+To explain the trained R-GCN, we use GNNExplainer \cite{gnnexplainer,pygexplainerdocs}. GNNExplainer learns an edge mask that assigns an importance score to each edge in the graph. Higher scores indicate that the edge was more influential for the selected prediction. The use of local explanation methods follows the course discussion of explaining individual predictions \cite{lecture-local,lecture-neural}.
+
+The explainer is configured for node-level multiclass classification. We explain the model prediction rather than the ground-truth label. Node feature masks are disabled, and edge masks are enabled. This choice focuses the explanation on RDF relationships, which is appropriate because the purpose of the project is to understand which graph relationships influenced the prediction.
+
+\subsection{Selected Node}
+
+The selected node is chosen from the correctly classified test nodes. Among those nodes, the node with the highest prediction confidence is selected for explanation.
+
+\begin{table}
+\centering
+\caption{Selected node for GNNExplainer.}
+\begin{tabular}{|l|r|}
+\hline
+Property & Value \\
+\hline
+Selected node index & 5710 \\
+\hline
+Predicted class & 2 \\
+\hline
+True class & 2 \\
+\hline
+Prediction confidence & 1.0 \\
+\hline
+\end{tabular}
+\end{table}
+
+This node is suitable for explanation because the prediction is correct and the model is highly confident.
+
+\subsection{Important Edges}
+
+GNNExplainer returns an importance score for each edge. The top 10 edge importance scores are:
+
+\begin{center}
+\texttt{[0.8011, 0.7937, 0.7818, 0.7707, 0.7613, 0.7464, 0.1365, 0.1365, 0.1362, 0.1362]}
+\end{center}
+
+The corresponding edge indices are:
+
+\begin{center}
+\texttt{[2095, 9069, 21478, 1480, 2574, 1455, 5928, 25052, 27301, 15586]}
+\end{center}
+
+The first six edges receive substantially higher scores than the remaining four. This suggests that the explanation is mainly driven by a small group of important RDF relationships.
+
+\subsection{Human-Readable RDF Interpretation}
+
+To make the explanation interpretable, the top-ranked edge indices are converted back into RDF triples. The most influential relationships are:
+
+\begin{itemize}
+    \item Research Group -> carriesOut -> Project
+    \item Project -> member -> Person
+    \item Publication -> editor -> Person
+    \item Research Area -> isWorkedOnBy -> Person
+    \item Research Group -> publishes -> Publication
+    \item Research Area -> dealtWithIn -> Project
+\end{itemize}
+
+These relationships are meaningful for the classification task. The model predicts a person's affiliation, and information about research groups, projects, publications, and research areas can provide evidence about that affiliation. For example, a project can be connected to a person through membership, a research group can be connected to projects and publications, and research areas can connect people to academic topics.
+
+The lower-scoring edges provide additional supporting information, such as:
+
+\begin{itemize}
+    \item Person -> publication -> Publication
+    \item Publication -> isAbout -> Research Area
+\end{itemize}
+
+These edges receive lower importance scores, but they still support the final explanation by connecting the selected person to publications and research areas.
+
+\subsection{Evaluation of the Explanation}
+
+The explanation is reasonable because the highest-scoring edges correspond to academic structures that are relevant to affiliation prediction. The explanation is not only numerical; it can be inspected in the original RDF domain. This is important because edge scores alone do not explain the semantic meaning of the model decision.
+
+The explanation also matches the dataset context. The AIFB graph contains people, projects, publications, research groups, and research areas. The top-ranked edges connect exactly these kinds of entities. Therefore, the explanation suggests that the R-GCN uses meaningful relational evidence rather than arbitrary graph edges.
+
+At the same time, the explanation should be interpreted as a local explanation for one selected node, not as a complete global explanation of the whole model. GNNExplainer optimizes an explanation mask for a specific prediction. The important edges for another test node may be different.
+
+\section{Conclusion}
+
+This project demonstrates a complete explainable AI workflow on an RDF knowledge graph. The AIFB dataset was loaded and analyzed, converted into a PyTorch Geometric graph, used to train a two-layer R-GCN, and evaluated on a deterministic train-test split. The final model achieved 94.44\% test accuracy. GNNExplainer was then used to explain one correct and confident prediction. By converting important edge indices back into RDF triples, the explanation became human-readable and meaningful in the original knowledge graph domain.
+
+\section{Contributions of Team Members}
+
+All team members contributed to the project implementation, analysis, and documentation. Steevan Gonsalves worked on RDF data loading, graph conversion, and reproducibility improvements. Ashton Prince Rodrigues worked on R-GCN model training, evaluation, and result analysis. Aman Sami Ur Rahman Mohammed worked on GNNExplainer configuration, RDF triple interpretation, and report preparation. The final notebook and report were reviewed collaboratively to ensure that the project satisfies the mini-project requirements.
+
+ChatGPT was used as an assistance tool for coding problem solving, debugging, improving reproducibility, and understanding implementation issues. The final technical decisions, notebook execution, result verification, and report content were reviewed by the team \cite{chatgpt}.
+
+\begin{thebibliography}{20}
+
+\bibitem{rgcn}
+Schlichtkrull, M., Kipf, T.N., Bloem, P., van den Berg, R., Titov, I., Welling, M.:
+Modeling Relational Data with Graph Convolutional Networks.
+In: European Semantic Web Conference, pp. 593--607 (2018)
+
+\bibitem{gnnexplainer}
+Ying, R., Bourgeois, D., You, J., Zitnik, M., Leskovec, J.:
+GNNExplainer: Generating Explanations for Graph Neural Networks.
+In: Advances in Neural Information Processing Systems (2019)
+
+\bibitem{pyg}
+Fey, M., Lenssen, J.E.:
+Fast Graph Representation Learning with PyTorch Geometric.
+In: ICLR Workshop on Representation Learning on Graphs and Manifolds (2019)
+
+\bibitem{pytorch}
+PyTorch contributors:
+PyTorch documentation.
+\url{https://pytorch.org/docs/stable/index.html}
+
+\bibitem{pygdocs}
+PyTorch Geometric contributors:
+PyTorch Geometric documentation.
+\url{https://pytorch-geometric.readthedocs.io/}
+
+\bibitem{pygexplainerdocs}
+PyTorch Geometric contributors:
+PyTorch Geometric explainability documentation.
+\url{https://pytorch-geometric.readthedocs.io/en/latest/modules/explain.html}
+
+\bibitem{rdflib}
+RDFLib contributors:
+RDFLib documentation.
+\url{https://rdflib.readthedocs.io/}
+
+\bibitem{sklearn}
+scikit-learn developers:
+\texttt{train\_test\_split} documentation.
+\url{https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.train_test_split.html}
+
+\bibitem{aifb}
+AIFB RDF dataset.
+\url{https://www.aifb.kit.edu/}
+
+\bibitem{lecture-org}
+Heindorf, S.:
+Explainable AI, Organization.
+Course lecture slides, Paderborn University (2026).
+
+\bibitem{lecture-miniproject}
+Heindorf, S.:
+Explainable AI, Mini Project.
+Course lecture slides, Paderborn University (2026).
+
+\bibitem{lecture-intro}
+Heindorf, S.:
+Explainable AI, Part 01: Introduction.
+Course lecture slides, Paderborn University (2026).
+
+\bibitem{lecture-local}
+Heindorf, S.:
+Explainable AI, Part 05: Local Model-Agnostic Explanations.
+Course lecture slides, Paderborn University (2026).
+
+\bibitem{lecture-neural}
+Heindorf, S.:
+Explainable AI, Part 07: Neural Networks.
+Course lecture slides, Paderborn University (2026).
+
+\bibitem{chatgpt}
+OpenAI:
+ChatGPT.
+Used for coding problem solving, debugging, reproducibility improvements, and support in understanding implementation issues.
+\url{https://chat.openai.com/}
+
+\end{thebibliography}
+
+\end{document}
